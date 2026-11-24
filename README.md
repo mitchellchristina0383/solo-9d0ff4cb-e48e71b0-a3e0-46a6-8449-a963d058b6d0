@@ -9,7 +9,8 @@
 ```
 ├── docker-compose.yml   # 一键启动：relay-a、relay-b、app
 ├── relay/               # SMTP 测试中继（纯标准库）
-│   └── smtp_relay.py    #   SMTP 口 + HTTP 控制口（动态调延迟/模拟复位）
+│   └── smtp_relay.py    #   SMTP 口 + HTTP 控制口（动态调延迟/模拟复位；
+│                        #   对端断开随即察觉，取消未发出的问候/应答并收尾）
 ├── app/                 # FastAPI 探测服务
 │   ├── main.py          #   探测编排：竞速拨号、问候收齐、NOOP、总时限、连接释放
 │   └── index.html       #   探测页（参数、场景预置、结果与时间线展示）

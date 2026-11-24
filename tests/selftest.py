@@ -69,6 +69,9 @@ check("备用在等待期满后起拨(≈1.0s)",
 check("备用胜出", r["noop"]["relay"] == "b" and r["noop"]["ok"], str(r["noop"]))
 check("首选被取消且连接关闭", r["relays"]["a"]["cancelled"] is True
       and r["relays"]["a"]["closed"] is True, str(r["relays"]["a"]))
+check("首选断开后中继随即释放(accepted==closed)",
+      r["relay_stats"]["a"]["accepted"] == r["relay_stats"]["a"]["closed"],
+      str(r["relay_stats"]["a"]))
 
 # ③ 首选建连即 RST：立即起拨备用（不等到备用等待期满）
 r = scenario("③ 首选复位 → 立即拨备用", {
@@ -99,6 +102,7 @@ check("两路连接均已释放", r["relays"]["a"]["closed"] and r["relays"]["b"
       f"a={r['relays']['a']['closed']} b={r['relays']['b']['closed']}")
 
 # ⑤ 问候快但 NOOP 应答超过总时限
+noop_before = r["relay_stats"]["a"]["noop"]  # 场景④后 relay-a 的累计 NOOP 数
 r = scenario("⑤ NOOP 应答超时限", {
     "relay_a": {"greeting_delay": 0.2, "response_delay": 3.0},
     "relay_b": {"greeting_delay": 0.2, "response_delay": 0.1},
@@ -107,10 +111,13 @@ check("结果为 noop_failed", r["outcome"] == "noop_failed", evts(r))
 check("NOOP 只发一次且沿首选", r["noop"]["sent"] and r["noop"]["relay"] == "a",
       str(r["noop"]))
 check("首选连接已释放", r["relays"]["a"]["closed"] is True)
+check("中继读到 NOOP 即计数(虽没回 250)",
+      r["relay_stats"]["a"]["noop"] == noop_before + 1,
+      f"before={noop_before} after={r['relay_stats']['a']['noop']}")
 
 # ⑥ 中继侧计数核对：accepted 与 closed 最终相等（无泄漏）。
-# 探测端关闭连接后，中继侧会话协程察觉 EOF/RST 需要一点时间
-# （场景④的中继还在 greeting_delay 里睡眠），这里轮询等待其收敛。
+# 中继在问候/应答延迟期间以 0.05s 粒度检测断开，探测端关闭连接后随即收尾，
+# 一般首轮轮询即收敛；保留轮询只是防御性余量。
 def relay_states():
     with urllib.request.urlopen(BASE + "/api/relay-state", timeout=10) as resp:
         return json.loads(resp.read())

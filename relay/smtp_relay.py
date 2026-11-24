@@ -33,8 +33,28 @@ STATS = {
 }
 
 
+DISCONNECT_POLL = 0.05  # 断线检测粒度：与问候分段间隔一致，足够"随即"察觉
+
+
 def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] [{NAME}] {msg}", flush=True)
+
+
+async def _sleep_unless_eof(reader: asyncio.StreamReader, delay: float) -> bool:
+    """睡眠 delay 秒；期间对端断开（FIN/RST，reader 收到 EOF）则提前醒来。
+
+    返回 True 表示睡满且连接仍在；False 表示对端已断开，调用方应取消
+    尚未发出的问候/应答并随即收尾。只读本连接的 reader，不影响其他会话。
+    """
+    loop = asyncio.get_running_loop()
+    end = loop.time() + max(0.0, delay)
+    while True:
+        if reader.at_eof():
+            return False
+        remaining = end - loop.time()
+        if remaining <= 0:
+            return True
+        await asyncio.sleep(min(DISCONNECT_POLL, remaining))
 
 
 def _reset_connection(writer: asyncio.StreamWriter) -> None:
@@ -61,12 +81,14 @@ async def smtp_session(reader: asyncio.StreamReader,
             _reset_connection(writer)
             return
 
-        delay = float(STATE.get("greeting_delay", 0.0))
-        if delay > 0:
-            await asyncio.sleep(delay)
+        # 问候前延迟：期间对端断开则取消未发出的问候，随即收尾
+        if not await _sleep_unless_eof(reader,
+                                       float(STATE.get("greeting_delay", 0.0))):
+            log("对端在问候发出前断开，取消问候")
+            return
 
         # 多行 220 问候，故意拆成多个 TCP 分段、段间留小间隔，
-        # 探测端必须能跨分段、跨行收齐。
+        # 探测端必须能跨分段、跨行收齐。段间对端断开则取消剩余分段。
         payload = (
             f"220-{NAME}.test ESMTP TestRelay\r\n"
             f"220-PIPELINING\r\n"
@@ -74,10 +96,14 @@ async def smtp_session(reader: asyncio.StreamReader,
         ).encode()
         n = len(payload)
         bounds = [0, n // 4, n // 2, (3 * n) // 4, n]
-        for a, b in zip(bounds, bounds[1:]):
-            writer.write(payload[a:b])
+        chunks = [payload[a:b] for a, b in zip(bounds, bounds[1:])]
+        for i, chunk in enumerate(chunks):
+            writer.write(chunk)
             await writer.drain()
-            await asyncio.sleep(0.05)
+            if i < len(chunks) - 1:  # 段间间隔，最后一段发出后不再空等
+                if not await _sleep_unless_eof(reader, 0.05):
+                    log("对端在问候分段间断开，取消剩余问候分段")
+                    return
         STATS["greeted"] += 1
         log("已发送分段多行 220 问候")
 
@@ -89,11 +115,15 @@ async def smtp_session(reader: asyncio.StreamReader,
             if not cmd:
                 continue
             verb = cmd.split()[0].upper()
-            d = float(STATE.get("response_delay", 0.0))
-            if d > 0:
-                await asyncio.sleep(d)
             if verb == "NOOP":
+                # 读到完整 NOOP 即计数，即使随后对端断开、没机会回 250
                 STATS["noop"] += 1
+            # 应答前延迟：期间对端断开则取消本次应答，随即收尾
+            if not await _sleep_unless_eof(reader,
+                                           float(STATE.get("response_delay", 0.0))):
+                log(f"对端在应答 {verb} 前断开，取消应答")
+                return
+            if verb == "NOOP":
                 writer.write(b"250 OK\r\n")
             elif verb in ("EHLO", "HELO"):
                 writer.write(f"250-{NAME}.test\r\n250 PIPELINING\r\n".encode())
